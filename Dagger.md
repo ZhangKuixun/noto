@@ -1,4 +1,5 @@
 dagger2是用于进行依赖注入的框架。dagger1由square开发，而现在dagger2由google继续开发和维护。在google出的几个Android架构示例(https://github.com/googlesamples/android-architecture/tree/todo-mvp-dagger, https://github.com/googlesamples/android-architecture-components/tree/master/GithubBrowserSample)中也用到了dagger2，给人一种谷歌钦定的感觉。
+
 那么，我们为什么要用到dagger呢？它是用来干嘛的？
 本文将通过介绍dagger2的相关的概念和一些常用用法来初探dagger2并能够上手使用，一些深入的用法也会在后续的文章中介绍。
 1.控制反转和依赖注入
