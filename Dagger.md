@@ -210,7 +210,233 @@ Dagger2在Android应用中，最简单的情况是在Application完成Component�
 但更复杂的情况下，还需要不同生命周期的Component来控制不同依赖图的生命，这就需要用到Scope以及Component间的依赖，以及Subcomponents，这些也都是Dagger2的重要概念，这将在下篇文章进行介绍。
 
 
-作者：qintong000
-链接：https://www.jianshu.com/p/f56d5b7e8b4d
-來源：简书
-著作权归作者所有。商业转载请联系作者获得授权，非商业转载请注明出处。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+在上一篇文章(http://www.jianshu.com/p/f56d5b7e8b4d)中，我们接触到了Dagger2的基本用法。然而在实际Android开发当中，还会有更进一步的需求：需要有多个不同生命周期的多个Component，例如，有些依赖图是全局单例的，而有些依赖图会与Activity/Fragment同周期，或者有些依赖图是要与用户登录同周期。在这些情况下，我们就需要自定义Scope来维护多个Component各自依赖图的生命周期。更进一步的，我们讨论利用Component间的依赖和subComponent两种方法来创建多个Component。
+1. Scope
+Scope注解是JSR-330标准中的，该注解是用来修饰其他注解的。 前篇文章提到的@Singleton就是一个被Scope标注的注解，是Scope的一个默认实现。
+Scope的注解的作用，是在一个Component的作用域中，依赖为单例的。也就是说同一个Component对象向各个类中注入依赖时候，注入的是同一个对象，而并非每次都new一个对象。
+在这里，我们再介绍自定义的Scope注解，如：
+@Scope
+public @interface ActivityScope {
+}
+如上，ActivityScope就是一个我们自己定义的Scope注解，其使用方式与上篇文章中我们用Singleton的用法类似的。顾名思义，在实际应用中Singleton代表了全局的单例，而我们定义ActivityScope代表了在Activity生命周期中相关依赖是单例的。
+Scope的注解具体用法如下：
+(1). 首先用其修饰Component
+(2). 如果依赖由Module的Provides或Binds方法提供，且该依赖在此Component中为单例的，则用Scope相关注解修饰Module的Provides和Binds方法。
+(3). 如果依赖通过构造方式注入，且该依赖在此Component中为单例的，则要用Scope修饰其类。
+我们通过如下例子详细说明，并进行测试和分析其原理：
+以Singleton这个Scope是实现为例：
+首先用它来修饰Component类：
+@Singleton
+@Component
+public interface AppComponent {
+    void inject(MainActivity mainActivity);
+}
+用通过构造方法注入依赖图的，用@Singleton修饰其类：
+@Singleton
+public class InfoRepository {
+    private static final String TAG = "InfoRepository";
+
+    @Inject
+    InfoRepository() {
+    }
+
+    public void test() {
+        Log.d(TAG, "test");
+    }
+}
+实际注入到Activity类中如下：
+public class MainActivity extends Activity {
+    @Inject
+    InfoRepository infoRepositoryA;
+    @Inject
+    InfoRepository infoRepositoryB;
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        MyApplication.getComponent().inject(this);
+        setContentView(R.layout.activity_main);
+        Log.d("test", "a:"+infoRepositoryA.hashCode());
+        Log.d("test", "b:"+infoRepositoryB.hashCode());
+    }
+}
+如上代码测试结果如下：
+10-19 19:25:08.253 26699-26699/com.qt.daggerTest D/test: a:442589
+10-19 19:25:08.254 26699-26699/com.qt.daggerTest D/test: b:442589
+如上可见，两次注入的InfoRepository对象为同一个。
+如果将上面修饰InfoRepository的@Singleton注解去掉，结果是什么呢？经过测试如下：
+10-19 19:23:00.092 23014-23014/com.qt.daggerTest D/test: a:442589
+10-19 19:23:00.092 23014-23014/com.qt.daggerTest D/test: b:160539730
+也就是说在不加@Singleton注解时候，每次注入的时候都是new一个新的对象。
+注意，如果我们将上面所有的@Singleton替换成我们自己的Scope注解其结果也是一致的，如替换成上文的ActivityScope。
+下面，我们通过分析Dagger自动生成的代码来分析如何实现单例的：
+在注入类不加@Singleton注解时，生成的DaggerAppComponent类的initialize()方法如下：
+  @SuppressWarnings("unchecked")
+  private void initialize(final Builder builder) {
+    this.mainActivityMembersInjector =
+        MainActivity_MembersInjector.create(InfoRepository_Factory.create());
+  }
+而加@Singleton注解后的initialize()方法变成了：
+  @SuppressWarnings("unchecked")
+  private void initialize(final Builder builder) {
+
+    this.infoRepositoryProvider = DoubleCheck.provider(InfoRepository_Factory.create());
+
+    this.mainActivityMembersInjector =
+        MainActivity_MembersInjector.create(infoRepositoryProvider);
+  }
+也是就是说提供InfoRepository的InfoRepositoryProvider替换成了DoubleCheck.provider(InfoRepository_Factory.create())。用DoubleCheck包装了原来对象的Provider。DoubleCheck顾名思义，应该是通过双重检查实现单例，我们看源码确实如此：
+public final class DoubleCheck<T> implements Provider<T>, Lazy<T> {
+  private static final Object UNINITIALIZED = new Object();
+
+  private volatile Provider<T> provider;
+  private volatile Object instance = UNINITIALIZED;
+
+  private DoubleCheck(Provider<T> provider) {
+    assert provider != null;
+    this.provider = provider;
+  }
+
+  @SuppressWarnings("unchecked") // cast only happens when result comes from the provider
+  @Override
+  public T get() {
+    Object result = instance;
+    if (result == UNINITIALIZED) {
+      synchronized (this) {
+        result = instance;
+        if (result == UNINITIALIZED) {
+          result = provider.get();
+          /* Get the current instance and test to see if the call to provider.get() has resulted
+           * in a recursive call.  If it returns the same instance, we'll allow it, but if the
+           * instances differ, throw. */
+          Object currentInstance = instance;
+          if (currentInstance != UNINITIALIZED && currentInstance != result) {
+            throw new IllegalStateException("Scoped provider was invoked recursively returning "
+                + "different results: " + currentInstance + " & " + result + ". This is likely "
+                + "due to a circular dependency.");
+          }
+          instance = result;
+          /* Null out the reference to the provider. We are never going to need it again, so we
+           * can make it eligible for GC. */
+          provider = null;
+        }
+      }
+    }
+    return (T) result;
+  ...
+  }
+其get方法就用了DoubleCheck方式保证了单例，其中还判断如果存在循环依赖的情况下抛出异常。
+注意，Scope只的单例是在Component的生命周期中相关依赖是单例的，也就是同一个Component对象注入的同类型的依赖是相同的。按上面例子，如果我们又创建了个AppComponent，它注入的InfoRepository对象与之前的肯定不是一个。
+2. Component间依赖
+在Android应用中，如果我们需要不止一个Component，而Component的依赖图中有需要其他Component依赖图中的某些依赖时候，利用Component间依赖（Component Dependency）方式是个很好的选择。在新建Component类时候可以在@Component注解里设置dependencies属性，确定其依赖的Component。在被依赖的Component中，如果要暴露其依赖图中的某个依赖给其他Component，要显示的在其中定义方法，使该依赖对其他Component可见如：
+@Singleton
+@Component(modules = AppModule.class)
+public interface AppComponent {
+    Application application();
+}
+@ActivityScope
+@Component(dependencies = AppComponent.class, modules = ActivityModule.class)
+public interface ActivityComponent {
+    void inject(MainActivity mainActivity);
+}
+在ActivityComponent中，就可以使用AppComponent依赖图中暴露出的Application依赖了。
+非常清晰，Component依赖(Component Dependency)的方式适用于Component只将某个或某几个依赖暴露给其他Component的情况下。
+3.subComponent
+定义subComponent是另一种方式使Component将依赖暴露给其他Component。当我们需要一个Component，它需要继承另外一个Component的所有依赖时，我们可以定义其为subComponent。
+具体用法如下：首先在父Component的接口中定义方法，来获得可以继承它的subComponent：
+@Singleton
+@Component(
+        modules = {AppModule.class}
+)
+public interface AppComponent {
+
+    UserComponent plus(UserModule userModule);
+
+}
+其次，其subComponent被@SubComponent注解修饰，如下：
+@UserScope
+@Subcomponent(
+        modules = {UserModule.class}
+)
+public interface UserComponent {
+  ...
+}
+Dagger会实现上面在接口中定义的plus()方法，我们通过调用父Component的plus方法或者对应的subComponent实例，具体如下：
+userComponent = appComponent.plus(new UserModule(user));
+这样，我们就获得了userComponent对象，可以利用他为其他类注入依赖了。
+注意，subComponent继承了其父Component的所有依赖图，也就是说被subComponent可以向其他类注入其父Component的所有依赖。
+4. 用多个Component组织你的Android应用
+前面几部分中，我们介绍了如何创建多个Component/subComponent并使其获得其他Component的依赖。这就为我们在应用中用多个Component组织组织应用提供了条件。文章http://frogermcs.github.io/dependency-injection-with-dagger-2-custom-scopes/ 提供了一个常用的思路：我们大概需要三个Component：AppComponent，UserComponent，ActivityComponent，如下：
+
+
+摘自http://frogermcs.github.io/dependency-injection-with-dagger-2-custom-scopes/
+
+上文介绍了，各个Component要有自己的Scope且不能相同，所以这几个Component对应的Scope分别为@Singleton ，@UserScop，@ActivityScope。也就是说，依赖在对应的Component生命周期(同个Component中)中都是单例的。而三个Component的生命周期都不同：AppComponent为应用全局单例的，UserComponent的生命周期对应了用户登录的生命周期(从用户登录一个账户到用户退出登录)，ActivityComponent对应了每个Activity的生命周期，如下：
+
+
+
+Scopes lifecycle 摘自http://frogermcs.github.io/dependency-injection-with-dagger-2-custom-scopes/
+
+在具体代码中，我们通过控制Component对象的生命周期来控制依赖图的周期，以UserComponent为例，在用户登录时候创建UserComponent实例，期间一直用该实例为相关类注入依赖，当其退出时候将UserComponent实例设为空，下次登录时候重新创建个UserComponent，大致如下：
+    public class MyApplication extends Application {
+      ...
+    private void initAppComponent() {
+        appComponent = DaggerAppComponent.builder()
+                .appModule(new AppModule(this))
+                .build();
+    }
+
+    public UserComponent createUserComponent(User user) {
+        userComponent = appComponent.plus(new UserModule(user));
+        return userComponent;
+    }
+
+    public void releaseUserComponent() {
+        userComponent = null;
+    }
+
+    public AppComponent getAppComponent() {
+        return appComponent;
+    }
+
+    public UserComponent getUserComponent() {
+        return userComponent;
+    }
+
+}
+createUserComponent和releaseUserComponent在用户登入和登出时候调用，所以在不同用户中用的是不同UserComponent对象注入，注入的依赖也不同。而AppComponent对象只有一个，所以其依赖图中的依赖为全局单例的。而对于ActivityComponent，则可以在Activity的onCreate()中生成ActivityComponent对象来为之注入依赖。
+5.多Component情况下Scope的使用限制
+Scope和多个Component在具体使用时候有一下几点限制需要注意：
+(1). Component和他所依赖的Component不能公用相同的Scope，每个Component都要有自己的Scope，编译时会报错，因为这有可能破坏Scope的范围，可详见https://github.com/google/dagger/issues/107#issuecomment-71073298。这种情况下编译会报错：
+Error:(21, 1) 错误:com.qt.daggerTest.AppComponent depends on scoped components in a non-hierarchical scope ordering:
+@com.qt.daggerTest.ActivityScope com.qt.daggerTest.AppComponent
+@com.qt.daggerTest.ActivityScope com.qt.daggerTest.ActivityComponent
+(2). @Singleton的Component不能依赖其他Component。这从意义和规范上也是说的通的，我们希望Singleton的Component应为全局的Component。这种情况下编译时会报错：
+Error:(23, 1) 错误: This @Singleton component cannot depend on scoped components:
+@Singleton com.qt.daggerTest.AppComponent
+(3). 无Scope的Component不能依赖有Scope的Component，因为这也会导致Scope被破坏。这时候编译时会报错：
+Error:(20, 2) 错误: com.qt.daggerTest.ActivityComponent (unscoped) cannot depend on scoped components:
+@com.qt.daggerTest.ActivityScope com.qt.daggerTest.AppComponent
+(4). Module以及通过构造函数注入依赖图的类和其Component不可有不相同的Scope，这种情况下编译时会报：
+Error:(6, 1) 错误: com.qt.daggerTest.AppComponent scoped with @com.qt.daggerTest.ActivityScope may not reference bindings with different scopes:
+@Singleton class com.qt.daggerTest.InfoRepository
+总结
+在上一篇Dagger2介绍与使用(http://www.jianshu.com/p/f56d5b7e8b4d)的基础之上，本文围绕着Android中多个Component情况下如何使用的问题展开了分析。首先说明了如何通过Scope和Component管理依赖的生命周期，再介绍了通过Component间依赖和subComponent两种方式完成一个Component将自己的依赖图暴露给其他Component的过程。然后介绍如一般在Android应用中如何划分Component，维护不同生命周期的依赖。
+经过两篇文章的介绍，Dagger2的使用基本清晰。Dagger2在处理Android应用的依赖非常得心应手，通过依赖注入的方式实现依赖反转，用容器(Component)来控制了所有依赖，使应用各个组件的依赖更加清晰。Dagger2的各种功能也比较灵活，能够应付Android应用依赖关系的各种复杂场景。
+
+
