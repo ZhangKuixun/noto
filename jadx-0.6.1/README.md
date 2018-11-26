@@ -8,8 +8,7 @@
 
 **jadx** - Dex to Java decompiler
 
-反编译APK
-从Android DEX和APK文件生成Java源代码的命令行和GUI工具
+反编译APK：从Android DEX和APK文件生成Java源代码的命令行和GUI工具
 
 ![jadx-gui screenshot](http://skylot.github.io/jadx/jadx-gui.png)
 
